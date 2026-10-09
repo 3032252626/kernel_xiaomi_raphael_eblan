@@ -29,28 +29,47 @@ jobs:
           ref: main
           path: kernel
           submodules: false
+          fetch-depth: 1
 
       - name: Setup KernelSU-Next submodule
         run: |
           set -e
           cd kernel
-          echo "=== 检查 submodule 指针 ==="
+
+          echo "=== 检查 submodule 指针（应为 1 个：KernelSU-Next）==="
           git ls-files -s | grep 160000 || true
 
           echo ""
           echo "=== 拉取 KernelSU-Next（唯一编译必需的 submodule）==="
+          echo "策略：钉住上游源码树 record 的 commit；失败则回退分支头"
           rm -rf KernelSU-Next
-          git clone --depth=200 https://github.com/Nevers1/KernelSU-Next KernelSU-Next
+          PINNED="$(git ls-files -s KernelSU-Next | awk '{print $2}')"
+          echo "记录中的 pinned sha = $PINNED"
+
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/Nevers1/KernelSU-Next KernelSU-Next
           cd KernelSU-Next
-          git checkout 4ff09ce8ea37
+          git fetch --depth=300 origin "$PINNED" 2>/dev/null || echo "深度抓取 pinned 失败，转全量"
+          if ! git checkout "$PINNED" 2>/dev/null; then
+            echo "pinned 不可达，回退到 legacy-3.4.0-audit-fixes 分支头"
+            git fetch --depth=1 origin legacy-3.4.0-audit-fixes
+            git checkout -f FETCH_HEAD
+          fi
           echo "KernelSU-Next HEAD: $(git rev-parse HEAD)"
+          echo "commit: $(git log -1 --format='%h %ad %s' --date=short)"
+          cd ..
 
           echo ""
           echo "=== 装配到 drivers/kernelsu（符号链接，与官方 setup.sh 一致）==="
-          cd "$GITHUB_WORKSPACE/kernel"
           rm -rf drivers/kernelsu
           ln -sf "$(realpath --relative-to=drivers KernelSU-Next/kernel)" drivers/kernelsu
-          ls -la drivers/kernelsu/ | head -20
+          ls -la drivers/kernelsu/ | head -25
+
+          echo ""
+          echo "=== 校验关键文件 ==="
+          test -f drivers/kernelsu/Kbuild && echo "OK Kbuild" || { echo "FAIL: 缺 Kbuild"; exit 1; }
+          test -f drivers/kernelsu/Kconfig && echo "OK Kconfig" || { echo "FAIL: 缺 Kconfig"; exit 1; }
+          test -d drivers/kernelsu/hook && echo "OK hook/" || echo "提示: 无 hook/ 目录"
 
           echo ""
           echo "=== 校验 drivers/ 里的引用 ==="
