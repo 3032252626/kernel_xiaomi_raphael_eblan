@@ -1,9 +1,3 @@
 [submodule "KernelSU-Next"]
 	path = KernelSU-Next
 	url = https://github.com/Nevers1/KernelSU-Next
-[submodule "KPatch-Next"]
-	path = KPatch-Next
-	url = https://github.com/KernelSU-Next/KPatch-Next
-[submodule "susfs4ksu"]
-	path = susfs4ksu
-	url = https://github.com/vaginessa/susfs4ksu-next
