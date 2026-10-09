@@ -1,0 +1,241 @@
+name: Build Eblan-Raphael LXC KernelSU Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      lxc_config:
+        description: '是否注入 LXC 所需配置（先保证开机时选 false）'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout kernel source (fork of Nevers1 / Eblan base)
+        uses: actions/checkout@v4
+        with:
+          repository: 3032252626/kernel_xiaomi_raphael_eblan
+          ref: main
+          path: kernel
+          submodules: false
+
+      - name: Setup KernelSU-Next submodule
+        run: |
+          set -e
+          cd kernel
+          echo "=== 检查 submodule 指针 ==="
+          git ls-files -s | grep 160000 || true
+
+          echo ""
+          echo "=== 拉取 KernelSU-Next（唯一编译必需的 submodule）==="
+          rm -rf KernelSU-Next
+          git clone --depth=200 https://github.com/Nevers1/KernelSU-Next KernelSU-Next
+          cd KernelSU-Next
+          git checkout 4ff09ce8ea37
+          echo "KernelSU-Next HEAD: $(git rev-parse HEAD)"
+
+          echo ""
+          echo "=== 装配到 drivers/kernelsu（符号链接，与官方 setup.sh 一致）==="
+          cd "$GITHUB_WORKSPACE/kernel"
+          rm -rf drivers/kernelsu
+          ln -sf "$(realpath --relative-to=drivers KernelSU-Next/kernel)" drivers/kernelsu
+          ls -la drivers/kernelsu/ | head -20
+
+          echo ""
+          echo "=== 校验 drivers/ 里的引用 ==="
+          grep -n "kernelsu" drivers/Makefile
+          grep -n "kernelsu" drivers/Kconfig
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev make libelf-dev libyaml-dev \
+            lz4 cpio zip git wget curl python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            device-tree-compiler
+          echo "clang: $(clang --version | head -1)"
+          echo "ld.lld: $(ld.lld --version)"
+          echo "aarch64 gcc: $(aarch64-linux-gnu-gcc --version | head -1)"
+
+      - name: Configure kernel
+        run: |
+          set -e
+          cd kernel
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER=EblanFork
+          export KBUILD_BUILD_HOST=github-actions
+
+          echo "=== make raphael_defconfig ==="
+          make O=out ARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            CLANG_TRIPLE=$CLANG_TRIPLE \
+            raphael_defconfig 2>&1 | tail -15
+
+          echo ""
+          echo "=== olddefconfig 补全 ==="
+          make O=out ARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            CLANG_TRIPLE=$CLANG_TRIPLE \
+            olddefconfig 2>&1 | tail -10
+
+          echo ""
+          echo "=== 开机关键项断言 ==="
+          fail=0
+          check() {
+            if grep -q "^$1=$2" out/.config; then
+              echo "  OK   $1=$2"
+            else
+              echo "  FAIL $1=$2  (实际: $(grep "^$1=" out/.config || echo '未设置'))"
+              fail=1
+            fi
+          }
+          check CONFIG_KSU y
+          check CONFIG_KSU_MANUAL_HOOK y
+          check CONFIG_ARCH_SM8150 y
+          check CONFIG_INITRAMFS_IGNORE_SKIP_FLAG y
+          check CONFIG_SECURITY_SELINUX y
+          check CONFIG_EXT4_FS y
+          check CONFIG_F2FS_FS y
+          check CONFIG_ANDROID_BINDERFS y
+          check CONFIG_TOUCHSCREEN_GOODIX_GTX8 y
+          check CONFIG_PINCTRL_SM8150 y
+          check CONFIG_DRM_MSM y
+          check CONFIG_BUILD_ARM64_DT_OVERLAY y
+
+          if [ -f out/.config ]; then
+            echo ""
+            echo "内置项(=y): $(grep -c '=y' out/.config)"
+            echo "模块项(=m): $(grep -c '=m' out/.config)"
+          fi
+
+          if [ "$fail" = "1" ]; then
+            echo ""
+            echo "!!! 有关键项未通过，但继续编译以便收集日志 !!!"
+          fi
+
+      - name: Inject LXC config (optional)
+        if: ${{ inputs.lxc_config == 'true' }}
+        run: |
+          cd kernel
+          echo "=== 注入 LXC 所需配置 ==="
+          cat >> arch/arm64/configs/raphael_defconfig <<'LXC'
+
+          # ---- LXC / container runtime ----
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_USER_NS=n
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_CGROUPS=y
+          CONFIG_MEMCG=y
+          CONFIG_MEMCG_SWAP=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_CGROUP_NET_PRIO=y
+          CONFIG_CGROUP_NET_CLASSID=y
+          CONFIG_CGROUP_HUGETLB=y
+          CONFIG_BLK_CGROUP=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_BINFMT_MISC=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+          CONFIG_OVERLAY_FS_INDEX=y
+          CONFIG_EROFS_FS=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_NETFILTER=y
+          CONFIG_IP_NF_NAT=y
+          CONFIG_IP_NF_TARGET_MASQUERADE=y
+          CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+          LXC
+          echo "已注入 $(tail -25 arch/arm64/configs/raphael_defconfig | grep -c '^CONFIG_') 项"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- raphael_defconfig 2>&1 | tail -3
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- olddefconfig 2>&1 | tail -3
+
+      - name: Build kernel
+        run: |
+          set -e
+          cd kernel
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER=EblanFork
+          export KBUILD_BUILD_HOST=github-actions
+
+          echo "=== 开始编译 -j$(nproc) ==="
+          set +e
+          make -j$(nproc) O=out ARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            CLANG_TRIPLE=$CLANG_TRIPLE \
+            KCFLAGS="-Wno-error" \
+            Image.gz-dtb dtbo.img > build.log 2>&1
+          rc=$?
+          set -e
+
+          if [ $rc -ne 0 ]; then
+            echo "=== 编译失败，错误摘要 ==="
+            grep -nE "error:|Error [0-9]+|undefined reference|No rule to make|fatal error" build.log | tail -60 || true
+            echo ""
+            echo "=== 首个错误上下文 ==="
+            L=$(grep -nE "Error [0-9]+|error:" build.log | head -1 | cut -d: -f1)
+            if [ -n "$L" ]; then
+              S=$((L-40)); [ $S -lt 1 ] && S=1
+              sed -n "${S},$((L+10))p" build.log
+            else
+              tail -80 build.log
+            fi
+            exit 1
+          fi
+
+          echo "=== 编译成功 ==="
+          ls -lh out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/dtbo.img 2>/dev/null || true
+
+      - name: Verify artifacts
+        run: |
+          cd kernel
+          echo "=== 产物校验 ==="
+          test -f out/arch/arm64/boot/Image.gz-dtb && echo "OK Image.gz-dtb" || { echo "缺失 Image.gz-dtb"; exit 1; }
+          test -f out/arch/arm64/boot/dtbo.img && echo "OK dtbo.img" || echo "警告: 无 dtbo.img"
+
+          echo ""
+          echo "=== 内核版本串 ==="
+          strings out/arch/arm64/boot/Image 2>/dev/null | grep "Linux version" | head -1 || \
+            strings out/arch/arm64/boot/Image.gz-dtb | grep "Linux version" | head -1
+
+          echo ""
+          echo "=== 尺寸 ==="
+          stat -c '%n %s bytes' out/arch/arm64/boot/Image.gz-dtb
+          [ -f out/arch/arm64/boot/dtbo.img ] && stat -c '%n %s bytes' out/arch/arm64/boot/dtbo.img
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-eblan-ksu-kernel
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/dtbo.img
+            kernel/out/.config
+            kernel/build.log
+          if-no-files-found: warn
