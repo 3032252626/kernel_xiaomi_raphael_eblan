@@ -82,11 +82,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev make libelf-dev libyaml-dev \
             lz4 cpio zip git wget curl python3 \
+            build-essential llvm lld clang \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             device-tree-compiler
-          echo "clang: $(clang --version | head -1)"
-          echo "ld.lld: $(ld.lld --version)"
+          echo "--- 工具链自检 ---"
+          echo "clang     : $(clang --version | head -1)"
+          echo "ld.lld    : $(ld.lld --version)"
+          echo "llvm-ar   : $(llvm-ar --version | head -1)"
+          echo "llvm-nm   : $(which llvm-nm)"
+          echo "llvm-objcopy: $(which llvm-objcopy)"
+          echo "llvm-strip: $(which llvm-strip)"
           echo "aarch64 gcc: $(aarch64-linux-gnu-gcc --version | head -1)"
+          echo "dtc       : $(dtc --version)"
+          echo ""
+          echo "--- 强制校验（缺任一即失败）---"
+          for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+            command -v "$t" >/dev/null 2>&1 && echo "  OK   $t" || { echo "  MISS $t"; exit 1; }
+          done
 
       - name: Configure kernel
         run: |
@@ -205,6 +217,8 @@ jobs:
           set +e
           make -j$(nproc) O=out ARCH=arm64 \
             LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
             CLANG_TRIPLE=$CLANG_TRIPLE \
